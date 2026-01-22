@@ -23,19 +23,19 @@ Ultra-low-latency bidirectional audio streaming module for FreeSWITCH. Provides 
 ## Architecture
 
 ```
-┌─────────────────┐     TCP (Raw PCM)         ┌──────────────────┐
-│  FreeSWITCH     │◄────────────────────────►│  Sidecar App     │
-│  mod_socket_audio│                          │  (Your code)     │
-└────────┬────────┘                           └────────┬─────────┘
-         │                                             │
-    Media Bug                                    Your Protocol
-    (READ_REPLACE +                             (WebSocket, gRPC,
-     WRITE_REPLACE)                              HTTP, etc.)
-         │                                             │
-    ┌────▼────┐                               ┌───────▼────────┐
-    │ SIP Call│                               │  External      │
-    └─────────┘                               │  Service       │
-                                              └────────────────┘
+┌───────────────────┐        TCP (Raw PCM)      ┌─────────────────┐
+│  FreeSWITCH       │◄───────────────────────-─►│   Sidecar App   │
+│  mod_socket_audio │                           │   (Your code)   │
+└────────┬──────────┘                           └────────┬────────┘
+         │                                               │
+     Media Bug                                     Your Protocol
+   (READ_REPLACE +                                (WebSocket, gRPC,
+    WRITE_REPLACE)                                  HTTP, etc.)
+         │                                               │
+    ┌────▼─────┐                                 ┌───────▼────────┐
+    │ SIP Call │                                 │    External    │
+    └──────────┘                                 │    Service     │
+                                                 └────────────────┘
 ```
 
 ## Prerequisites
