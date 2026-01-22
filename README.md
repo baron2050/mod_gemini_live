@@ -1,32 +1,41 @@
-# mod_gemini_live
+# mod_socket_audio
 
-Ultra-low-latency bidirectional audio streaming module for FreeSWITCH, designed to integrate with Google's Gemini Multimodal Live API.
+Ultra-low-latency bidirectional audio streaming module for FreeSWITCH. Provides a raw PCM audio pipe over TCP for integration with external audio processing services.
 
 ## Overview
 
-`mod_gemini_live` provides a "dumb pipe" for raw PCM audio between FreeSWITCH and an external TCP socket. It handles only audio transport and resampling - all call control, WebSocket handling, and Gemini protocol logic is delegated to an external sidecar application controlled via ESL (Event Socket Library).
+`mod_socket_audio` provides a "dumb pipe" for raw PCM audio between FreeSWITCH and an external TCP socket. It handles only audio transport and resampling - all call control and application logic is delegated to an external sidecar application controlled via ESL (Event Socket Library).
+
+### Use Cases
+
+- **AI Voice Assistants**: Integrate with Google Gemini, OpenAI Realtime API, or other AI voice services
+- **Speech Processing**: Connect to external ASR/TTS engines
+- **Audio Analysis**: Stream audio to analysis services in real-time
+- **Custom IVR**: Build sophisticated voice applications with external logic
 
 ### Design Philosophy
 
 - **Minimal latency**: No buffering delays, immediate playback
 - **Simple**: Audio only, all call control via ESL
 - **Fast**: Pure raw PCM on socket, no parsing overhead
+- **Generic**: Works with any audio processing backend
 
 ## Architecture
 
 ```
 ┌─────────────────┐     TCP (Raw PCM)         ┌──────────────────┐
 │  FreeSWITCH     │◄────────────────────────►│  Sidecar App     │
-│  mod_gemini_live│                           │  (Your code)     │
+│  mod_socket_audio│                          │  (Your code)     │
 └────────┬────────┘                           └────────┬─────────┘
          │                                             │
-    Media Bug                                   WebSocket + JSON
-    (READ_REPLACE +                                    │
-     WRITE_REPLACE)                            ┌───────▼────────┐
-         │                                     │  Gemini Live   │
-    ┌────▼────┐                                │  API           │
-    │ SIP Call│                                └────────────────┘
-    └─────────┘
+    Media Bug                                    Your Protocol
+    (READ_REPLACE +                             (WebSocket, gRPC,
+     WRITE_REPLACE)                              HTTP, etc.)
+         │                                             │
+    ┌────▼────┐                               ┌───────▼────────┐
+    │ SIP Call│                               │  External      │
+    └─────────┘                               │  Service       │
+                                              └────────────────┘
 ```
 
 ## Prerequisites
@@ -53,8 +62,8 @@ export FS_PREFIX=/usr/local/freeswitch
 
 ```bash
 # Clone the repository
-git clone https://github.com/emaktel/mod_gemini_live.git
-cd mod_gemini_live
+git clone https://github.com/emaktel/mod_socket_audio.git
+cd mod_socket_audio
 
 # Build
 make
@@ -63,13 +72,13 @@ make
 sudo make install
 
 # Load in FreeSWITCH (via fs_cli)
-fs_cli -x "load mod_gemini_live"
+fs_cli -x "load mod_socket_audio"
 ```
 
 To automatically load on startup, add to `modules.conf.xml`:
 
 ```xml
-<load module="mod_gemini_live"/>
+<load module="mod_socket_audio"/>
 ```
 
 ## Usage
@@ -79,7 +88,7 @@ To automatically load on startup, add to `modules.conf.xml`:
 Route calls to your sidecar application using outbound ESL:
 
 ```xml
-<extension name="gemini_assistant">
+<extension name="voice_assistant">
   <condition field="destination_number" expression="^5000$">
     <action application="answer"/>
     <action application="socket" data="127.0.0.1:8084 async full"/>
@@ -89,45 +98,45 @@ Route calls to your sidecar application using outbound ESL:
 
 ### Starting the Audio Pipe
 
-From your sidecar via ESL, execute the `gemini_live` application:
+From your sidecar via ESL, execute the `socket_audio` application:
 
 ```
-execute gemini_live 127.0.0.1 9001
+execute socket_audio 127.0.0.1 9001
 ```
 
 This connects to your sidecar's audio TCP server on the specified host and port.
 
 ### API Commands
 
-#### `uuid_gemini_flush <uuid>`
+#### `uuid_socket_audio_flush <uuid>`
 
-Flushes the audio playback queue and enters a 500ms discard window to clear in-flight packets.
+Flushes the audio playback queue and enters a 50ms discard window to clear in-flight packets.
 
 ```bash
 # Via fs_cli
-uuid_gemini_flush <session-uuid>
+uuid_socket_audio_flush <session-uuid>
 
 # Via ESL
-api uuid_gemini_flush <session-uuid>
+api uuid_socket_audio_flush <session-uuid>
 ```
 
 **Use cases:**
-- Gemini signals end-of-turn
+- End-of-turn signaling from AI service
 - User interrupts (barge-in)
 - Stop current playback immediately
 
 **Response:** `+OK` on success, `-ERR <message>` on failure
 
-#### `uuid_gemini_stop <uuid>`
+#### `uuid_socket_audio_stop <uuid>`
 
-Stops the Gemini audio pipe for a session.
+Stops the socket audio pipe for a session.
 
 ```bash
 # Via fs_cli
-uuid_gemini_stop <session-uuid>
+uuid_socket_audio_stop <session-uuid>
 
 # Via ESL
-api uuid_gemini_stop <session-uuid>
+api uuid_socket_audio_stop <session-uuid>
 ```
 
 **Use cases:**
@@ -136,6 +145,25 @@ api uuid_gemini_stop <session-uuid>
 - Manual cleanup (optional - hangup auto-cleans)
 
 **Response:** `+OK` on success, `-ERR <message>` on failure
+
+### Events
+
+The module emits custom events that can be subscribed to via ESL:
+
+#### `socket_audio::playback_start`
+
+Fired when audio playback begins (first frame written after silence or flush).
+
+#### `socket_audio::playback_stop`
+
+Fired when audio playback stops. Includes a `Playback-Stop-Reason` header:
+- `complete` - Queue emptied naturally (end of audio)
+- `flush` - Playback interrupted by flush command
+
+**ESL subscription:**
+```
+event plain CUSTOM socket_audio::playback_start socket_audio::playback_stop
+```
 
 ## Audio Format Specifications
 
@@ -152,7 +180,7 @@ The module exchanges **pure raw PCM** with the sidecar - no headers, no framing,
 
 ### Session Rate Handling
 
-The module automatically resamples between the session's codec rate (8kHz, 16kHz, 48kHz, etc.) and the fixed Gemini rates:
+The module automatically resamples between the session's codec rate (8kHz, 16kHz, 48kHz, etc.) and the fixed socket rates:
 - **Outbound**: Session rate → 16kHz
 - **Inbound**: 24kHz → Session rate
 
@@ -165,23 +193,24 @@ The module automatically resamples between the session's codec rate (8kHz, 16kHz
 | CPU per call | Minimal (resampling only) |
 | Socket protocol | Zero overhead (raw PCM) |
 | Queue capacity | 90 seconds |
+| Discard window | 50ms |
 
 ### Critical Implementation Details
 
-- **TCP_NODELAY**: Enabled on both ends to disable Nagle's algorithm (~40-200ms latency reduction)
+- **TCP_NODELAY**: Enabled to disable Nagle's algorithm (~40-200ms latency reduction)
 - **Non-blocking sends**: Packets dropped rather than blocking the media thread
 - **Zero-latency playback**: No pre-buffering, immediate playback on data arrival
 - **Automatic cleanup**: All resources freed on call hangup via session pool
 
 ---
 
-## Sidecar Requirements
+## Sidecar Implementation
 
 The module requires an external sidecar application to handle:
 1. ESL connection from FreeSWITCH
 2. TCP audio server for raw PCM exchange
-3. WebSocket connection to Gemini Live API
-4. Base64 encoding/decoding for Gemini protocol
+3. Connection to your external audio service
+4. Audio format conversion as needed
 5. Turn detection and flush commands
 
 ### Sidecar Architecture
@@ -192,15 +221,15 @@ The module requires an external sidecar application to handle:
 │  ┌──────────────────┐  ┌───────────────────────────────────────────┐│
 │  │ Outbound ESL     │  │ Per-Call Handler                          ││
 │  │ Server (:8084)   │  │  - TCP Audio Server (ephemeral port)      ││
-│  │                  │  │  - Gemini WebSocket Client                 ││
-│  │ - Call control   │  │  - Audio format conversion (base64)        ││
+│  │                  │  │  - External Service Client                 ││
+│  │ - Call control   │  │  - Audio format conversion                 ││
 │  │ - Execute apps   │  │  - Turn detection → flush command          ││
 │  │ - Hangup         │  │                                            ││
 │  └──────────────────┘  └───────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Sidecar Responsibilities
+### Example: Basic Sidecar
 
 #### 1. ESL Server
 
@@ -229,20 +258,39 @@ const audioServer = net.createServer((socket) => {
 
   // Receive 16kHz PCM from FreeSWITCH
   socket.on('data', (pcmData) => {
-    // Forward to Gemini (base64 encoded)
-    sendToGemini(pcmData);
+    // Forward to your external service
+    sendToExternalService(pcmData);
   });
 });
 
 audioServer.listen(0, '127.0.0.1', () => {
   const port = audioServer.address().port;
-  // Execute: gemini_live 127.0.0.1 <port>
+  // Execute: socket_audio 127.0.0.1 <port>
 });
 ```
 
-#### 3. Gemini WebSocket Connection
+#### 3. ESL Commands
 
-Connect to Gemini Live API and handle audio:
+Start the audio pipe after setting up the audio server:
+
+```javascript
+// Answer the call
+await sendEslCommand('sendmsg\ncall-command: execute\nexecute-app-name: answer');
+
+// Start audio pipe
+await sendEslCommand(
+  `sendmsg\ncall-command: execute\nexecute-app-name: socket_audio\nexecute-app-arg: 127.0.0.1 ${audioPort}`
+);
+
+// Flush audio queue (on interruption or end-of-turn)
+await sendEslCommand(`api uuid_socket_audio_flush ${uuid}`);
+```
+
+---
+
+## Example: Google Gemini Integration
+
+Here's an example of integrating with Google's Gemini Multimodal Live API:
 
 ```javascript
 // Send audio to Gemini (16kHz PCM → base64)
@@ -271,75 +319,20 @@ function handleGeminiMessage(message) {
 
   // Handle interruption
   if (message.serverContent?.interrupted) {
-    eslConn.api(`uuid_gemini_flush ${uuid}`);
+    eslConn.api(`uuid_socket_audio_flush ${uuid}`);
   }
 }
-```
-
-#### 4. ESL Commands
-
-Start the audio pipe after setting up the audio server:
-
-```javascript
-// Answer the call
-await sendEslCommand('sendmsg\ncall-command: execute\nexecute-app-name: answer');
-
-// Start audio pipe
-await sendEslCommand(
-  `sendmsg\ncall-command: execute\nexecute-app-name: gemini_live\nexecute-app-arg: 127.0.0.1 ${audioPort}`
-);
-
-// Flush audio queue (on interruption)
-await sendEslCommand(`api uuid_gemini_flush ${uuid}`);
-```
-
-### Node.js Dependencies
-
-A typical Node.js sidecar requires:
-
-```json
-{
-  "dependencies": {
-    "@google/genai": "^1.x"
-  }
-}
-```
-
-Or using raw WebSocket:
-
-```json
-{
-  "dependencies": {
-    "ws": "^8.x"
-  }
-}
-```
-
-### Gemini API Configuration
-
-```javascript
-const GEMINI_MODEL = 'gemini-2.0-flash-exp';  // Or latest model
-const GEMINI_CONFIG = {
-  responseModalities: ['AUDIO'],
-  speechConfig: {
-    voiceConfig: {
-      prebuiltVoiceConfig: {
-        voiceName: 'Aoede'  // Or other voice
-      }
-    }
-  }
-};
 ```
 
 ---
 
 ## Troubleshooting
 
-### No audio reaching Gemini
+### No audio reaching sidecar
 
 1. Verify module is loaded:
    ```bash
-   fs_cli -x "module_exists mod_gemini_live"
+   fs_cli -x "module_exists mod_socket_audio"
    ```
 
 2. Check socket connection in logs:
@@ -359,7 +352,7 @@ const GEMINI_CONFIG = {
 
 1. Verify UUID is correct
 2. Check ESL connection is active
-3. Confirm `uuid_gemini_flush` returns `+OK`
+3. Confirm `uuid_socket_audio_flush` returns `+OK`
 
 ---
 
